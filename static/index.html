@@ -60,14 +60,14 @@
              @dragleave.prevent="$el.classList.remove('drag-over')"
              @drop.prevent="handleDrop($event,'sb')"
              @click="$refs.sbInput.click()">
-          <input type="file" x-ref="sbInput" accept=".csv,.xlsx,.xls" class="hidden" @change="handleFile($event,'sb')">
+          <input type="file" x-ref="sbInput" accept=".csv,.xlsx,.xls,.pdf" class="hidden" @change="handleFile($event,'sb')">
           <div x-show="!sbFile">
             <svg class="mx-auto w-8 h-8 text-slate-300 mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round"
                 d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z"/>
             </svg>
             <p class="text-sm text-slate-500">Click or drag &amp; drop</p>
-            <p class="text-xs text-slate-400 mt-1">CSV, XLSX, XLS</p>
+            <p class="text-xs text-slate-400 mt-1">CSV, XLSX, XLS, PDF</p>
           </div>
           <div x-show="sbFile" class="flex items-center justify-center gap-2">
             <svg class="w-5 h-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">
@@ -87,14 +87,14 @@
              @dragleave.prevent="$el.classList.remove('drag-over')"
              @drop.prevent="handleDrop($event,'ebrc')"
              @click="$refs.ebrcInput.click()">
-          <input type="file" x-ref="ebrcInput" accept=".csv,.xlsx,.xls" class="hidden" @change="handleFile($event,'ebrc')">
+          <input type="file" x-ref="ebrcInput" accept=".csv,.xlsx,.xls,.pdf" class="hidden" @change="handleFile($event,'ebrc')">
           <div x-show="!ebrcFile">
             <svg class="mx-auto w-8 h-8 text-slate-300 mb-2" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round"
                 d="M12 16.5V9.75m0 0l3 3m-3-3l-3 3M6.75 19.5a4.5 4.5 0 01-1.41-8.775 5.25 5.25 0 0110.233-2.33 3 3 0 013.758 3.848A3.752 3.752 0 0118 19.5H6.75z"/>
             </svg>
             <p class="text-sm text-slate-500">Click or drag &amp; drop</p>
-            <p class="text-xs text-slate-400 mt-1">CSV, XLSX, XLS</p>
+            <p class="text-xs text-slate-400 mt-1">CSV, XLSX, XLS, PDF</p>
           </div>
           <div x-show="ebrcFile" class="flex items-center justify-center gap-2">
             <svg class="w-5 h-5 text-green-500" fill="currentColor" viewBox="0 0 20 20">

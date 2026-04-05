@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+import pdfplumber
 from dateutil import parser as dateutil_parser
 
 from models import AuditRow, ReconciliationConfig, ReconciliationStatus, ReconciliationSummary
@@ -83,7 +84,7 @@ EBRC_REQUIRED = ["shipping_bill_number", "invoice_number", "currency", "realised
 # ---------------------------------------------------------------------------
 
 def read_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """Read CSV or Excel bytes into a DataFrame."""
+    """Read CSV, Excel, or PDF bytes into a DataFrame."""
     fname = filename.lower()
     if fname.endswith(".csv"):
         try:
@@ -92,11 +93,119 @@ def read_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
             df = pd.read_csv(io.BytesIO(file_bytes), dtype=str, encoding="latin-1")
     elif fname.endswith((".xlsx", ".xls")):
         df = pd.read_excel(io.BytesIO(file_bytes), dtype=str)
+    elif fname.endswith(".pdf"):
+        df = _read_pdf(file_bytes, filename)
     else:
-        raise ValueError(f"Unsupported file format: {filename}. Use CSV or Excel.")
+        raise ValueError(f"Unsupported file format: {filename}. Use CSV, Excel, or PDF.")
 
     if df.empty:
-        raise ValueError(f"File '{filename}' is empty.")
+        raise ValueError(f"File '{filename}' is empty or no table could be extracted.")
+    return df
+
+
+def _read_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Extract tabular data from a PDF.
+
+    Strategy:
+    1. Try pdfplumber table extraction across all pages.
+       - Merge pages, deduplicate repeated headers.
+    2. If no tables found, attempt line-by-line text parsing
+       (works for simple fixed-width or delimiter-separated layouts).
+    """
+    all_rows: List[List[str]] = []
+    header: Optional[List[str]] = None
+
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page_num, page in enumerate(pdf.pages):
+            tables = page.extract_tables()
+            if not tables:
+                continue
+
+            # Use the largest table on the page
+            table = max(tables, key=lambda t: len(t))
+            if not table:
+                continue
+
+            for row_idx, row in enumerate(table):
+                # Clean each cell
+                clean_row = [
+                    re.sub(r"\s+", " ", str(cell or "")).strip()
+                    for cell in row
+                ]
+
+                # Skip completely empty rows
+                if all(c == "" for c in clean_row):
+                    continue
+
+                if header is None:
+                    # First non-empty row on first page with a table = header
+                    header = clean_row
+                    all_rows.append(clean_row)
+                else:
+                    # Skip repeated header rows (common in multi-page PDFs)
+                    if clean_row == header:
+                        continue
+                    all_rows.append(clean_row)
+
+    if all_rows and len(all_rows) > 1:
+        df = pd.DataFrame(all_rows[1:], columns=all_rows[0], dtype=str)
+        # Drop rows that are all empty or all NaN
+        df = df.dropna(how="all").reset_index(drop=True)
+        df = df[~df.apply(lambda r: r.str.strip().eq("").all(), axis=1)]
+        if not df.empty:
+            return df
+
+    # Fallback: extract raw text and try to parse as whitespace-delimited table
+    logger.warning(
+        "%s: no structured tables found via pdfplumber; attempting text fallback.", filename
+    )
+    return _read_pdf_text_fallback(file_bytes, filename)
+
+
+def _read_pdf_text_fallback(file_bytes: bytes, filename: str) -> pd.DataFrame:
+    """
+    Last-resort: extract all text from the PDF, split by lines,
+    and try to detect a header row + data rows separated by 2+ spaces or tabs.
+    """
+    lines: List[str] = []
+    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
+            lines.extend(text.splitlines())
+
+    # Filter blank lines
+    lines = [l for l in lines if l.strip()]
+    if not lines:
+        raise ValueError(
+            f"Could not extract any text from '{filename}'. "
+            "The PDF may be scanned/image-based. Please export it as CSV or Excel."
+        )
+
+    # Detect delimiter: prefer tab, else 2+ spaces
+    sample = "\n".join(lines[:10])
+    delimiter = "\t" if "\t" in sample else r"\s{2,}"
+
+    parsed: List[List[str]] = []
+    for line in lines:
+        if delimiter == "\t":
+            parts = line.split("\t")
+        else:
+            parts = re.split(r"\s{2,}", line)
+        parsed.append([p.strip() for p in parts])
+
+    if len(parsed) < 2:
+        raise ValueError(
+            f"'{filename}': extracted text but could not parse table structure. "
+            "Please export as CSV or Excel."
+        )
+
+    # Normalise column count to max width
+    max_cols = max(len(r) for r in parsed)
+    padded = [r + [""] * (max_cols - len(r)) for r in parsed]
+
+    df = pd.DataFrame(padded[1:], columns=padded[0], dtype=str)
+    df = df.dropna(how="all").reset_index(drop=True)
     return df
 
 

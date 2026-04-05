@@ -10,6 +10,9 @@ xlrd==2.0.1
 numpy==1.26.4
 python-dateutil==2.9.0
 
+# PDF parsing
+pdfplumber==0.11.0
+
 # Google Sheets
 google-auth==2.29.0
 google-api-python-client==2.128.0
