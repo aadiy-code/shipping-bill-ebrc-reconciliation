@@ -50,6 +50,16 @@ SB_ALIASES: Dict[str, List[str]] = {
     "invoice_date": [
         "invoice date", "inv date", "invoice_date", "export invoice date",
     ],
+    # ── ICEGATE combined column: "2.Invoice No. & Dt." ─────────────────────
+    # The value looks like "215 29/10/2025" — invoice number + space + date.
+    # When detected, the code splits it into invoice_number + invoice_date.
+    "invoice_no_date_combined": [
+        "invoice no. & dt.", "invoice no. & dt", "invoice no & dt",
+        "invoice no.& dt.", "invoice no &dt", "invoice no. and dt.",
+        "invoice no. & date", "inv no. & dt.", "inv no & dt",
+        # ICEGATE prefixes each column with a digit and dot, e.g. "2.invoice no. & dt."
+        "2.invoice no. & dt.", "2.invoice no. & dt", "2.inv no. & dt.",
+    ],
     # ── Informational (not used for matching) ──────────────────────────────
     "port_code":  ["port code", "port_code", "port", "customs port"],
     "iec":        ["iec", "iec code", "iec_code", "importer exporter code"],
@@ -57,7 +67,7 @@ SB_ALIASES: Dict[str, List[str]] = {
     "fob_value":  [
         "fob value", "export value", "fob_value", "export_value", "fob",
         "invoice value", "invoice_value", "total fob", "fob amount",
-        "exported value", "export amount",
+        "exported value", "export amount", "1.invoice value",
     ],
     "ad_code":    ["ad code", "ad_code", "authorised dealer code", "ad bank code"],
 }
@@ -113,9 +123,12 @@ EBRC_ALIASES: Dict[str, List[str]] = {
     "ad_code":         ["ad code", "ad_code", "authorised dealer code", "ad bank code"],
 }
 
-# Only these 4 fields are mandatory — everything else is informational
-SB_REQUIRED   = ["shipping_bill_number", "shipping_bill_date", "invoice_number", "invoice_date"]
+# Mandatory fields for eBRC (always separate columns)
 EBRC_REQUIRED = ["shipping_bill_number", "shipping_bill_date", "invoice_number", "invoice_date"]
+
+# SB mandatory — invoice_number + invoice_date may come from a single combined column
+SB_REQUIRED_BASE   = ["shipping_bill_number", "shipping_bill_date"]
+SB_REQUIRED_INVOICE = ["invoice_number", "invoice_date"]   # OR invoice_no_date_combined
 
 # ---------------------------------------------------------------------------
 # File parsing
@@ -290,6 +303,45 @@ def parse_date(val) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# ICEGATE combined field: "215 29/10/2025" → ("215", "2025-10-29")
+# ---------------------------------------------------------------------------
+
+# Date patterns to detect inside a combined value (tried in order)
+_DATE_PATTERNS = [
+    r"\b(\d{2}/\d{2}/\d{4})\b",   # DD/MM/YYYY  ← most common in ICEGATE
+    r"\b(\d{2}-\d{2}-\d{4})\b",   # DD-MM-YYYY
+    r"\b(\d{2}\.\d{2}\.\d{4})\b", # DD.MM.YYYY
+    r"\b(\d{2}/\d{2}/\d{2})\b",   # DD/MM/YY
+    r"\b(\d{4}-\d{2}-\d{2})\b",   # YYYY-MM-DD
+]
+
+
+def split_invoice_no_date(val) -> Tuple[str, Optional[str]]:
+    """
+    Split a combined ICEGATE 'Invoice No. & Dt.' cell.
+
+    Examples:
+        "215 29/10/2025"      → ("215",        "2025-10-29")
+        "EXP/001 15-03-2025"  → ("EXP/001",    "2025-03-15")
+        "INV-42 2025-01-10"   → ("INV-42",     "2025-01-10")
+        "123"                 → ("123",         None)   # no date found
+    """
+    s = clean_text(val)
+    if not s or s.lower() in ("nan", "none", "na", "n/a", "-"):
+        return "", None
+
+    for pattern in _DATE_PATTERNS:
+        m = re.search(pattern, s)
+        if m:
+            raw_date  = m.group(1)
+            inv_part  = (s[: m.start()] + s[m.end() :]).strip()
+            return normalise_invoice_number(inv_part), parse_date(raw_date)
+
+    # No date found — treat entire value as invoice number
+    return normalise_invoice_number(s), None
+
+
+# ---------------------------------------------------------------------------
 # Build normalised DataFrames
 # ---------------------------------------------------------------------------
 
@@ -308,11 +360,35 @@ def build_normalised_sb(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFra
 
     ndf["shipping_bill_number"] = ndf["shipping_bill_number"].apply(normalise_sb_number)
     ndf["shipping_bill_date"]   = ndf["shipping_bill_date"].apply(parse_date)
-    ndf["invoice_number"]       = ndf["invoice_number"].apply(normalise_invoice_number)
-    ndf["invoice_date"]         = ndf["invoice_date"].apply(parse_date)
+
+    has_separate_inv = "invoice_number" in mapping and "invoice_date" in mapping
+    has_combined     = "invoice_no_date_combined" in mapping
+
+    if has_separate_inv:
+        # Straightforward — each is its own column
+        ndf["invoice_number"] = ndf["invoice_number"].apply(normalise_invoice_number)
+        ndf["invoice_date"]   = ndf["invoice_date"].apply(parse_date)
+
+    elif has_combined:
+        # ICEGATE format: "215 29/10/2025" in a single column → split it
+        split_results = ndf["invoice_no_date_combined"].apply(split_invoice_no_date)
+        ndf["invoice_number"] = split_results.apply(lambda x: x[0])
+        ndf["invoice_date"]   = split_results.apply(lambda x: x[1])
+        logger.info(
+            "SB: used combined 'Invoice No. & Dt.' column — "
+            "split into invoice_number + invoice_date for all rows."
+        )
+
+    elif "invoice_number" in mapping:
+        # Only invoice number present (no date) — keep number, leave date as None
+        ndf["invoice_number"] = ndf["invoice_number"].apply(normalise_invoice_number)
+        ndf["invoice_date"]   = None
+    else:
+        ndf["invoice_number"] = None
+        ndf["invoice_date"]   = None
 
     # Informational — fill with None if absent
-    for col in ("port_code", "iec", "currency", "fob_value", "ad_code"):
+    for col in ("invoice_no_date_combined", "port_code", "iec", "currency", "fob_value", "ad_code"):
         if col not in ndf.columns:
             ndf[col] = None
 
@@ -436,7 +512,19 @@ def reconcile(
     sb_map   = map_columns(sb_raw,   SB_ALIASES)
     ebrc_map = map_columns(ebrc_raw, EBRC_ALIASES)
 
-    validate_columns(sb_map,   SB_REQUIRED,   "Shipping Bill")
+    # SB validation: base fields always required;
+    # invoice fields satisfied by separate columns OR the combined column
+    validate_columns(sb_map, SB_REQUIRED_BASE, "Shipping Bill")
+    has_sb_inv_separate = all(f in sb_map for f in SB_REQUIRED_INVOICE)
+    has_sb_inv_combined = "invoice_no_date_combined" in sb_map
+    if not has_sb_inv_separate and not has_sb_inv_combined:
+        raise ValueError(
+            "Shipping Bill: could not find invoice number/date columns. "
+            "Expected either separate 'Invoice Number' + 'Invoice Date' columns, "
+            "or a combined 'Invoice No. & Dt.' column (ICEGATE format like '215 29/10/2025'). "
+            "Use the 🔍 Preview Columns button to see what was detected."
+        )
+
     validate_columns(ebrc_map, EBRC_REQUIRED, "eBRC")
 
     # ── Normalise ────────────────────────────────────────────────────────────
