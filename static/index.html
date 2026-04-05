@@ -179,8 +179,8 @@
     </div>
   </section>
 
-  <!-- ── Run Button ── -->
-  <div class="flex items-center gap-4">
+  <!-- ── Preview + Run ── -->
+  <div class="flex flex-wrap items-center gap-3">
     <button @click="run()"
             :disabled="loading || !sbFile || !ebrcFile || !form.spreadsheet_id"
             class="px-7 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold rounded-lg shadow transition">
@@ -189,8 +189,42 @@
         <span class="spinner"></span> Processing…
       </span>
     </button>
+
+    <button @click="previewCols('sb')" :disabled="!sbFile || loading"
+            class="px-4 py-3 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-medium rounded-lg transition text-sm">
+      🔍 Preview SB Columns
+    </button>
+    <button @click="previewCols('ebrc')" :disabled="!ebrcFile || loading"
+            class="px-4 py-3 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 font-medium rounded-lg transition text-sm">
+      🔍 Preview eBRC Columns
+    </button>
+
     <p x-show="!sbFile || !ebrcFile || !form.spreadsheet_id" class="text-xs text-amber-600">
-      Both files and Spreadsheet ID are required.
+      Both files and Spreadsheet ID are required to run.
+    </p>
+  </div>
+
+  <!-- Preview result panel -->
+  <div x-show="colPreview" class="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-3">
+    <div class="flex justify-between items-start">
+      <div>
+        <p class="text-sm font-semibold text-slate-700" x-text="colPreview && colPreview.filename"></p>
+        <p class="text-xs text-slate-500 mt-0.5">
+          <span x-text="colPreview && colPreview.total_rows"></span> rows detected
+        </p>
+      </div>
+      <button @click="colPreview=null" class="text-slate-400 hover:text-slate-600 text-lg leading-none">✕</button>
+    </div>
+    <div>
+      <p class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Detected Column Headers</p>
+      <div class="flex flex-wrap gap-2">
+        <template x-for="col in (colPreview && colPreview.columns_detected || [])" :key="col">
+          <span class="px-2 py-1 bg-white border border-slate-200 rounded text-xs font-mono text-slate-700" x-text="col"></span>
+        </template>
+      </div>
+    </div>
+    <p class="text-xs text-indigo-600 font-medium">
+      ⬆ Share these header names so we can add them to the alias table if they aren't matching.
     </p>
   </div>
 
@@ -314,6 +348,7 @@ function app() {
     errorMsg: '',
     search: '',
     filterStatus: '',
+    colPreview: null,
     form: {
       spreadsheet_id: '',
       sheet_tab_name: 'Sheet1',
@@ -339,6 +374,23 @@ function app() {
       if (!file) return;
       if (type === 'sb') this.sbFile = file;
       else this.ebrcFile = file;
+    },
+
+    async previewCols(type) {
+      this.colPreview = null;
+      this.errorMsg = '';
+      const file = type === 'sb' ? this.sbFile : this.ebrcFile;
+      if (!file) return;
+      const fd = new FormData();
+      fd.append('file', file);
+      try {
+        const res = await fetch('/preview-columns', { method: 'POST', body: fd });
+        const data = await res.json();
+        if (!res.ok) this.errorMsg = data.detail || 'Preview failed';
+        else this.colPreview = data;
+      } catch (err) {
+        this.errorMsg = 'Preview error: ' + err.message;
+      }
     },
 
     async run() {

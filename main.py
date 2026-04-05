@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from models import ReconciliationConfig, ReconciliationSummary
-from reconciler import reconcile
+from reconciler import reconcile, read_file
 from sheets_updater import update_sheet
 
 # ---------------------------------------------------------------------------
@@ -67,6 +67,29 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.post("/preview-columns")
+async def preview_columns(
+    file: UploadFile = File(..., description="Any SB or eBRC file (CSV, Excel, PDF)"),
+):
+    """
+    Parse a file and return its detected column headers + first 3 rows.
+    Use this to diagnose column-name mismatches before running reconciliation.
+    """
+    try:
+        file_bytes = await file.read()
+        df = read_file(file_bytes, file.filename or "upload")
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    preview_rows = df.head(3).fillna("").astype(str).to_dict(orient="records")
+    return JSONResponse({
+        "filename": file.filename,
+        "total_rows": len(df),
+        "columns_detected": list(df.columns),
+        "preview_rows": preview_rows,
+    })
 
 
 @app.post("/reconcile")
