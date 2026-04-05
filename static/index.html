@@ -26,7 +26,7 @@
     tr:hover td { background:#f8fafc; }
   </style>
 </head>
-<body class="bg-slate-50 min-h-screen font-sans text-slate-800" x-data="app()" x-cloak>
+<body class="bg-slate-50 min-h-screen font-sans text-slate-800" x-data="app()" x-init="init()" x-cloak>
 
 <!-- ── Header ── -->
 <header class="bg-indigo-700 text-white shadow">
@@ -110,10 +110,23 @@
 
   <!-- ── Google Sheets Config ── -->
   <section class="bg-white rounded-xl shadow-sm border border-slate-200 p-6">
-    <h2 class="text-base font-semibold mb-4 flex items-center gap-2">
-      <span class="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center justify-center">2</span>
-      Google Sheets Configuration
-    </h2>
+    <div class="flex items-center justify-between mb-4">
+      <h2 class="text-base font-semibold flex items-center gap-2">
+        <span class="w-6 h-6 rounded-full bg-indigo-100 text-indigo-700 text-xs font-bold flex items-center justify-center">2</span>
+        Google Sheets Configuration
+      </h2>
+      <div class="flex items-center gap-3">
+        <span x-show="savedIndicator"
+              class="text-xs text-green-600 font-medium flex items-center gap-1 transition-opacity">
+          ✓ Saved
+        </span>
+        <span class="text-xs text-slate-400">Auto-saved to this browser</span>
+        <button @click="clearSaved()"
+                class="text-xs text-red-400 hover:text-red-600 underline underline-offset-2 transition">
+          Clear saved data
+        </button>
+      </div>
+    </div>
     <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
       <div class="md:col-span-2">
         <label class="label">Spreadsheet ID <span class="text-red-500">*</span></label>
@@ -339,7 +352,15 @@
 </style>
 
 <script>
+const STORAGE_KEY = 'sb_ebrc_recon_config';
+
 function app() {
+  // Load saved config from localStorage (fall back to defaults)
+  const saved = (() => {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}'); }
+    catch { return {}; }
+  })();
+
   return {
     sbFile: null,
     ebrcFile: null,
@@ -349,16 +370,41 @@ function app() {
     search: '',
     filterStatus: '',
     colPreview: null,
+    savedIndicator: false,   // brief "Saved ✓" flash
+
     form: {
-      spreadsheet_id: '',
-      sheet_tab_name: 'Sheet1',
-      key_column: 'Shipping Bill Number',
-      status_column: 'Status',
-      remarks_column: 'Remarks',
-      color_target_column: 'Status',
-      amount_tolerance: 0.01,
-      enable_grouped_matching: true,
-      service_account_json: '',
+      spreadsheet_id:        saved.spreadsheet_id        ?? '',
+      sheet_tab_name:        saved.sheet_tab_name        ?? 'Sheet1',
+      key_column:            saved.key_column            ?? 'Shipping Bill Number',
+      status_column:         saved.status_column         ?? 'Status',
+      remarks_column:        saved.remarks_column        ?? 'Remarks',
+      color_target_column:   saved.color_target_column   ?? 'Status',
+      amount_tolerance:      saved.amount_tolerance      ?? 0.01,
+      enable_grouped_matching: saved.enable_grouped_matching ?? true,
+      service_account_json:  saved.service_account_json  ?? '',
+    },
+
+    // Called by x-init — watches form for changes and auto-saves
+    init() {
+      this.$watch('form', (val) => {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(val));
+          this.savedIndicator = true;
+          clearTimeout(this._saveTimer);
+          this._saveTimer = setTimeout(() => { this.savedIndicator = false; }, 1800);
+        } catch {}
+      }, { deep: true });
+    },
+
+    clearSaved() {
+      localStorage.removeItem(STORAGE_KEY);
+      Object.assign(this.form, {
+        spreadsheet_id: '', sheet_tab_name: 'Sheet1',
+        key_column: 'Shipping Bill Number', status_column: 'Status',
+        remarks_column: 'Remarks', color_target_column: 'Status',
+        amount_tolerance: 0.01, enable_grouped_matching: true,
+        service_account_json: '',
+      });
     },
 
     handleFile(event, type) {
