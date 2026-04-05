@@ -1,6 +1,13 @@
 """
-Reconciliation engine: parses Shipping Bill and eBRC files,
-normalises data, runs layered matching, and returns per-row results.
+Reconciliation engine.
+
+The ONLY four fields compared are:
+  1. SB Number           (SB) ↔ Shipping Bill Number          (eBRC)
+  2. SB Date             (SB) ↔ Shipping Bill / Invoice Date  (eBRC)
+  3. Invoice Number      (SB) ↔ GST Invoice Number            (eBRC)
+  4. Invoice Date        (SB) ↔ GST Invoice Date              (eBRC)
+
+Currency and amount are NOT used for matching (kept as informational only).
 """
 from __future__ import annotations
 
@@ -24,60 +31,91 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 SB_ALIASES: Dict[str, List[str]] = {
+    # ── Mandatory ──────────────────────────────────────────────────────────
     "shipping_bill_number": [
         "shipping bill number", "sb number", "sb no", "sb_no", "s.b. no",
-        "shipping_bill_no", "shipping bill no", "sb num", "bill number",
-        "shipment bill number", "shipping bill", "sb",
+        "s.b no", "sb.no", "shipping_bill_no", "shipping bill no", "sb num",
+        "bill number", "shipment bill number", "shipping bill", "sb",
+        "s b number", "shippingbillnumber",
     ],
     "shipping_bill_date": [
         "shipping bill date", "sb date", "sb_date", "bill date",
-        "shipment date", "shipping date",
+        "shipment date", "shipping date", "s.b. date", "s b date",
     ],
     "invoice_number": [
         "invoice number", "invoice no", "invoice_no", "inv no", "inv number",
         "inv_no", "invoice num", "invoice#", "invoice_number",
+        "export invoice number", "export invoice no",
     ],
-    "invoice_date": ["invoice date", "inv date", "invoice_date"],
-    "port_code": ["port code", "port_code", "port", "customs port"],
-    "iec": ["iec", "iec code", "iec_code", "importer exporter code"],
-    "currency": ["currency", "curr", "currency code", "currency_code"],
-    "fob_value": [
+    "invoice_date": [
+        "invoice date", "inv date", "invoice_date", "export invoice date",
+    ],
+    # ── Informational (not used for matching) ──────────────────────────────
+    "port_code":  ["port code", "port_code", "port", "customs port"],
+    "iec":        ["iec", "iec code", "iec_code", "importer exporter code"],
+    "currency":   ["currency", "curr", "currency code", "currency_code"],
+    "fob_value":  [
         "fob value", "export value", "fob_value", "export_value", "fob",
-        "invoice value", "invoice_value", "total fob", "total_fob",
-        "fob amount", "exported value", "export amount",
+        "invoice value", "invoice_value", "total fob", "fob amount",
+        "exported value", "export amount",
     ],
-    "ad_code": ["ad code", "ad_code", "authorised dealer code", "ad bank code"],
+    "ad_code":    ["ad code", "ad_code", "authorised dealer code", "ad bank code"],
 }
 
 EBRC_ALIASES: Dict[str, List[str]] = {
+    # ── Mandatory ──────────────────────────────────────────────────────────
+    "shipping_bill_number": [
+        # Exact names seen in eBRC PDFs
+        "shipping bill number", "sb number", "sb no", "sb_no",
+        "shipping_bill_no", "shipping bill no", "sb", "bill number",
+        "s.b. no", "s b number",
+    ],
+    "shipping_bill_date": [
+        # Exact eBRC column name reported by user
+        "shipping bill / invoice date",
+        "shipping bill/invoice date",
+        "shipping bill/ invoice date",
+        "shipping bill /invoice date",
+        "sb/invoice date", "sb / invoice date",
+        # Fallback generics
+        "shipping bill date", "sb date", "sb_date", "bill date",
+        "shipment date",
+    ],
+    "invoice_number": [
+        # Exact eBRC column names reported by user
+        "gst invoice number", "gst invoice no", "gst inv no",
+        "gst invoice num", "gst_invoice_number",
+        # Fallback generics
+        "invoice number", "invoice no", "invoice_no", "inv no",
+        "inv number", "invoice#", "invoice_number",
+    ],
+    "invoice_date": [
+        # Exact eBRC column names reported by user
+        "gst invoice date", "gst inv date", "gst_invoice_date",
+        # Fallback generics
+        "invoice date", "inv date", "invoice_date",
+    ],
+    # ── Informational ──────────────────────────────────────────────────────
     "ebrc_number": [
         "ebrc number", "ebrc no", "ebrc_no", "brc number", "brc no",
         "brc_no", "ebrc", "brc",
     ],
-    "shipping_bill_number": [
-        "shipping bill number", "sb number", "sb no", "sb_no",
-        "shipping_bill_no", "shipping bill no", "sb", "bill number",
-    ],
-    "shipping_bill_date": ["shipping bill date", "sb date", "sb_date", "bill date"],
-    "invoice_number": [
-        "invoice number", "invoice no", "invoice_no", "inv no",
-        "inv number", "invoice#", "invoice_number",
-    ],
-    "currency": ["currency", "curr", "currency code", "currency_code"],
+    "brc_date":        ["brc date", "brc_date", "ebrc date", "realisation date"],
+    "currency":        ["currency", "curr", "currency code", "currency_code"],
     "realised_amount": [
         "realised amount", "realized amount", "realised_amount",
         "realized_amount", "amount", "realization amount",
         "realisation amount", "inward remittance", "fcy amount",
         "foreign currency amount",
     ],
-    "brc_date": ["brc date", "brc_date", "ebrc date", "realisation date"],
-    "port_code": ["port code", "port_code", "port", "customs port"],
-    "iec": ["iec", "iec code", "iec_code", "importer exporter code"],
-    "ad_code": ["ad code", "ad_code", "authorised dealer code", "ad bank code"],
+    "port_code":       ["port code", "port_code", "port", "customs port"],
+    "iec":             ["iec", "iec code", "iec_code", "importer exporter code"],
+    "ad_code":         ["ad code", "ad_code", "authorised dealer code", "ad bank code"],
 }
 
-SB_REQUIRED = ["shipping_bill_number", "invoice_number", "currency", "fob_value"]
-EBRC_REQUIRED = ["shipping_bill_number", "invoice_number", "currency", "realised_amount"]
+# Only these 4 fields are mandatory — everything else is informational
+SB_REQUIRED   = ["shipping_bill_number", "shipping_bill_date", "invoice_number", "invoice_date"]
+EBRC_REQUIRED = ["shipping_bill_number", "shipping_bill_date", "invoice_number", "invoice_date"]
 
 # ---------------------------------------------------------------------------
 # File parsing
@@ -106,92 +144,63 @@ def read_file(file_bytes: bytes, filename: str) -> pd.DataFrame:
 def _read_pdf(file_bytes: bytes, filename: str) -> pd.DataFrame:
     """
     Extract tabular data from a PDF.
-
-    Strategy:
-    1. Try pdfplumber table extraction across all pages.
-       - Merge pages, deduplicate repeated headers.
-    2. If no tables found, attempt line-by-line text parsing
-       (works for simple fixed-width or delimiter-separated layouts).
+    Strategy 1: pdfplumber table extraction across all pages (deduplicates repeated headers).
+    Strategy 2: Raw text fallback for non-grid PDFs.
     """
     all_rows: List[List[str]] = []
     header: Optional[List[str]] = None
 
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        for page_num, page in enumerate(pdf.pages):
+        for page in pdf.pages:
             tables = page.extract_tables()
             if not tables:
                 continue
-
-            # Use the largest table on the page
             table = max(tables, key=lambda t: len(t))
             if not table:
                 continue
-
-            for row_idx, row in enumerate(table):
-                # Clean each cell
-                clean_row = [
-                    re.sub(r"\s+", " ", str(cell or "")).strip()
-                    for cell in row
-                ]
-
-                # Skip completely empty rows
+            for row in table:
+                clean_row = [re.sub(r"\s+", " ", str(cell or "")).strip() for cell in row]
                 if all(c == "" for c in clean_row):
                     continue
-
                 if header is None:
-                    # First non-empty row on first page with a table = header
                     header = clean_row
                     all_rows.append(clean_row)
                 else:
-                    # Skip repeated header rows (common in multi-page PDFs)
-                    if clean_row == header:
+                    if clean_row == header:   # repeated header on next page
                         continue
                     all_rows.append(clean_row)
 
     if all_rows and len(all_rows) > 1:
         df = pd.DataFrame(all_rows[1:], columns=all_rows[0], dtype=str)
-        # Drop rows that are all empty or all NaN
         df = df.dropna(how="all").reset_index(drop=True)
         df = df[~df.apply(lambda r: r.str.strip().eq("").all(), axis=1)]
         if not df.empty:
             return df
 
-    # Fallback: extract raw text and try to parse as whitespace-delimited table
-    logger.warning(
-        "%s: no structured tables found via pdfplumber; attempting text fallback.", filename
-    )
+    logger.warning("%s: no structured tables found; attempting text fallback.", filename)
     return _read_pdf_text_fallback(file_bytes, filename)
 
 
 def _read_pdf_text_fallback(file_bytes: bytes, filename: str) -> pd.DataFrame:
-    """
-    Last-resort: extract all text from the PDF, split by lines,
-    and try to detect a header row + data rows separated by 2+ spaces or tabs.
-    """
     lines: List[str] = []
     with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
         for page in pdf.pages:
             text = page.extract_text(x_tolerance=3, y_tolerance=3) or ""
             lines.extend(text.splitlines())
 
-    # Filter blank lines
     lines = [l for l in lines if l.strip()]
     if not lines:
         raise ValueError(
             f"Could not extract any text from '{filename}'. "
-            "The PDF may be scanned/image-based. Please export it as CSV or Excel."
+            "The PDF may be scanned/image-based. Please export as CSV or Excel."
         )
 
-    # Detect delimiter: prefer tab, else 2+ spaces
     sample = "\n".join(lines[:10])
     delimiter = "\t" if "\t" in sample else r"\s{2,}"
 
     parsed: List[List[str]] = []
     for line in lines:
-        if delimiter == "\t":
-            parts = line.split("\t")
-        else:
-            parts = re.split(r"\s{2,}", line)
+        parts = line.split("\t") if delimiter == "\t" else re.split(r"\s{2,}", line)
         parsed.append([p.strip() for p in parts])
 
     if len(parsed) < 2:
@@ -200,24 +209,21 @@ def _read_pdf_text_fallback(file_bytes: bytes, filename: str) -> pd.DataFrame:
             "Please export as CSV or Excel."
         )
 
-    # Normalise column count to max width
     max_cols = max(len(r) for r in parsed)
     padded = [r + [""] * (max_cols - len(r)) for r in parsed]
-
     df = pd.DataFrame(padded[1:], columns=padded[0], dtype=str)
-    df = df.dropna(how="all").reset_index(drop=True)
-    return df
+    return df.dropna(how="all").reset_index(drop=True)
 
+
+# ---------------------------------------------------------------------------
+# Column mapping helpers
+# ---------------------------------------------------------------------------
 
 def normalise_col_name(name: str) -> str:
     return re.sub(r"\s+", " ", str(name).strip().lower())
 
 
 def map_columns(df: pd.DataFrame, alias_table: Dict[str, List[str]]) -> Dict[str, str]:
-    """
-    Returns a mapping from canonical_name -> actual_df_column_name.
-    Raises ValueError listing any required-but-missing canonical columns.
-    """
     norm_df_cols = {normalise_col_name(c): c for c in df.columns}
     mapping: Dict[str, str] = {}
     for canonical, aliases in alias_table.items():
@@ -228,17 +234,13 @@ def map_columns(df: pd.DataFrame, alias_table: Dict[str, List[str]]) -> Dict[str
     return mapping
 
 
-def validate_columns(
-    mapping: Dict[str, str],
-    required: List[str],
-    file_label: str,
-) -> None:
+def validate_columns(mapping: Dict[str, str], required: List[str], file_label: str) -> None:
     missing = [r for r in required if r not in mapping]
     if missing:
         raise ValueError(
             f"{file_label}: required columns not found — "
             + ", ".join(missing)
-            + ". Check column headers."
+            + ". Use the '🔍 Preview Columns' button to see what headers were detected."
         )
 
 
@@ -246,33 +248,29 @@ def validate_columns(
 # Data normalisation helpers
 # ---------------------------------------------------------------------------
 
-def clean_text(val: Optional[str]) -> str:
+def clean_text(val) -> str:
     if val is None or (isinstance(val, float) and np.isnan(val)):
         return ""
     return re.sub(r"\s+", " ", str(val).strip())
 
 
-def normalise_text(val: Optional[str]) -> str:
+def normalise_text(val) -> str:
     return clean_text(val).upper()
 
 
-def normalise_sb_number(val: Optional[str]) -> str:
-    """Remove leading zeros, spaces, special chars; keep alphanumeric."""
+def normalise_sb_number(val) -> str:
     v = clean_text(val).upper()
     v = re.sub(r"[^A-Z0-9/]", "", v)
     return v.lstrip("0") if v else v
 
 
-def normalise_invoice_number(val: Optional[str]) -> str:
+def normalise_invoice_number(val) -> str:
     v = clean_text(val).upper()
-    v = re.sub(r"[^A-Z0-9/\-]", "", v)
-    return v
+    return re.sub(r"[^A-Z0-9/\-]", "", v)
 
 
-def parse_date(val: Optional[str]) -> Optional[str]:
-    """Return ISO date string YYYY-MM-DD or None."""
-    if not val:
-        return None
+def parse_date(val) -> Optional[str]:
+    """Return ISO date YYYY-MM-DD or None."""
     s = clean_text(val)
     if not s or s.lower() in ("nan", "none", "na", "n/a", "-"):
         return None
@@ -291,183 +289,121 @@ def parse_date(val: Optional[str]) -> Optional[str]:
         return None
 
 
-def parse_amount(val: Optional[str]) -> Optional[float]:
-    """Parse numeric amount string to float."""
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return None
-    s = str(val).strip()
-    if not s or s.lower() in ("nan", "none", "na", "n/a", "-"):
-        return None
-    # remove currency symbols, commas
-    s = re.sub(r"[₹$€£¥,\s]", "", s)
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # Build normalised DataFrames
 # ---------------------------------------------------------------------------
 
-def build_normalised_sb(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+def _base_normalise(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
     rows = []
     for idx, row in df.iterrows():
-        r: Dict[str, object] = {"_orig_index": idx}
+        r: Dict = {"_orig_index": idx}
         for canon, col in mapping.items():
             r[canon] = row.get(col, "")
         rows.append(r)
-    ndf = pd.DataFrame(rows)
+    return pd.DataFrame(rows)
+
+
+def build_normalised_sb(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    ndf = _base_normalise(df, mapping)
 
     ndf["shipping_bill_number"] = ndf["shipping_bill_number"].apply(normalise_sb_number)
-    ndf["invoice_number"] = ndf["invoice_number"].apply(normalise_invoice_number)
-    ndf["currency"] = ndf.get("currency", pd.Series(dtype=str)).apply(normalise_text)
-    ndf["fob_value"] = ndf["fob_value"].apply(parse_amount)
+    ndf["shipping_bill_date"]   = ndf["shipping_bill_date"].apply(parse_date)
+    ndf["invoice_number"]       = ndf["invoice_number"].apply(normalise_invoice_number)
+    ndf["invoice_date"]         = ndf["invoice_date"].apply(parse_date)
 
-    if "shipping_bill_date" in ndf.columns:
-        ndf["shipping_bill_date"] = ndf["shipping_bill_date"].apply(parse_date)
-    else:
-        ndf["shipping_bill_date"] = None
-
-    for opt in ("invoice_date", "port_code", "iec", "ad_code"):
-        if opt not in ndf.columns:
-            ndf[opt] = None
-        elif opt in ("port_code", "iec", "ad_code"):
-            ndf[opt] = ndf[opt].apply(normalise_text)
+    # Informational — fill with None if absent
+    for col in ("port_code", "iec", "currency", "fob_value", "ad_code"):
+        if col not in ndf.columns:
+            ndf[col] = None
 
     return ndf
 
 
 def build_normalised_ebrc(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
-    rows = []
-    for idx, row in df.iterrows():
-        r: Dict[str, object] = {"_orig_index": idx}
-        for canon, col in mapping.items():
-            r[canon] = row.get(col, "")
-        rows.append(r)
-    ndf = pd.DataFrame(rows)
+    ndf = _base_normalise(df, mapping)
 
     ndf["shipping_bill_number"] = ndf["shipping_bill_number"].apply(normalise_sb_number)
-    ndf["invoice_number"] = ndf["invoice_number"].apply(normalise_invoice_number)
-    ndf["currency"] = ndf.get("currency", pd.Series(dtype=str)).apply(normalise_text)
-    ndf["realised_amount"] = ndf["realised_amount"].apply(parse_amount)
+    ndf["shipping_bill_date"]   = ndf["shipping_bill_date"].apply(parse_date)
+    ndf["invoice_number"]       = ndf["invoice_number"].apply(normalise_invoice_number)
+    ndf["invoice_date"]         = ndf["invoice_date"].apply(parse_date)
 
-    if "shipping_bill_date" in ndf.columns:
-        ndf["shipping_bill_date"] = ndf["shipping_bill_date"].apply(parse_date)
-    else:
-        ndf["shipping_bill_date"] = None
-
-    for opt in ("ebrc_number", "brc_date", "port_code", "iec", "ad_code"):
-        if opt not in ndf.columns:
-            ndf[opt] = None
-        elif opt in ("port_code", "iec", "ad_code"):
-            ndf[opt] = ndf[opt].apply(normalise_text)
+    # Informational — fill with None if absent
+    for col in ("ebrc_number", "brc_date", "currency", "realised_amount", "port_code", "iec", "ad_code"):
+        if col not in ndf.columns:
+            ndf[col] = None
 
     return ndf
 
 
 # ---------------------------------------------------------------------------
-# Amount comparison
-# ---------------------------------------------------------------------------
-
-def amounts_match(a: Optional[float], b: Optional[float], tolerance: float) -> bool:
-    if a is None or b is None:
-        return False
-    base = max(abs(a), abs(b), 1.0)
-    return abs(a - b) <= tolerance * base
-
-
-# ---------------------------------------------------------------------------
-# Single-row comparison
+# Core comparison — exactly 4 fields
 # ---------------------------------------------------------------------------
 
 def compare_sb_ebrc(
     sb: pd.Series,
     ebrc: pd.Series,
-    tolerance: float,
 ) -> Tuple[ReconciliationStatus, str, str]:
     """
-    Compare a single SB row against a single eBRC row.
+    Compare one SB row against one eBRC row on the 4 agreed fields.
+    SB Number is already confirmed equal (used as lookup key).
+
     Returns (status, mismatch_reason, remarks).
     """
     mismatches: List[str] = []
 
-    # Invoice number
-    if sb["invoice_number"] and ebrc["invoice_number"]:
-        if sb["invoice_number"] != ebrc["invoice_number"]:
+    # ── Field 2: SB Date ────────────────────────────────────────────────────
+    sb_date   = sb.get("shipping_bill_date")
+    ebrc_date = ebrc.get("shipping_bill_date")
+    if sb_date and ebrc_date:
+        if sb_date != ebrc_date:
             mismatches.append(
-                f"Invoice mismatch (SB: {sb['invoice_number']}, eBRC: {ebrc['invoice_number']})"
+                f"SB Date mismatch (SB file: {sb_date}, eBRC: {ebrc_date})"
             )
+    elif sb_date and not ebrc_date:
+        mismatches.append("SB Date missing in eBRC")
+    elif not sb_date and ebrc_date:
+        mismatches.append("SB Date missing in Shipping Bill")
 
-    # Shipping bill date
-    if sb.get("shipping_bill_date") and ebrc.get("shipping_bill_date"):
-        if sb["shipping_bill_date"] != ebrc["shipping_bill_date"]:
+    # ── Field 3: Invoice Number ─────────────────────────────────────────────
+    sb_inv   = sb.get("invoice_number")
+    ebrc_inv = ebrc.get("invoice_number")
+    if sb_inv and ebrc_inv:
+        if sb_inv != ebrc_inv:
             mismatches.append(
-                f"Date mismatch (SB: {sb['shipping_bill_date']}, eBRC: {ebrc['shipping_bill_date']})"
+                f"Invoice Number mismatch (SB file: {sb_inv}, eBRC GST Invoice: {ebrc_inv})"
             )
+    elif sb_inv and not ebrc_inv:
+        mismatches.append("GST Invoice Number missing in eBRC")
+    elif not sb_inv and ebrc_inv:
+        mismatches.append("Invoice Number missing in Shipping Bill")
 
-    # Currency
-    if sb["currency"] and ebrc["currency"]:
-        if sb["currency"] != ebrc["currency"]:
+    # ── Field 4: Invoice Date ───────────────────────────────────────────────
+    sb_inv_date   = sb.get("invoice_date")
+    ebrc_inv_date = ebrc.get("invoice_date")
+    if sb_inv_date and ebrc_inv_date:
+        if sb_inv_date != ebrc_inv_date:
             mismatches.append(
-                f"Currency mismatch (SB: {sb['currency']}, eBRC: {ebrc['currency']})"
+                f"Invoice Date mismatch (SB file: {sb_inv_date}, eBRC GST Invoice Date: {ebrc_inv_date})"
             )
+    elif sb_inv_date and not ebrc_inv_date:
+        mismatches.append("GST Invoice Date missing in eBRC")
+    elif not sb_inv_date and ebrc_inv_date:
+        mismatches.append("Invoice Date missing in Shipping Bill")
 
-    # Amount
-    if sb["fob_value"] is not None and ebrc["realised_amount"] is not None:
-        if not amounts_match(sb["fob_value"], ebrc["realised_amount"], tolerance):
-            mismatches.append(
-                f"Amount mismatch (SB: {sb['fob_value']}, eBRC: {ebrc['realised_amount']})"
-            )
-    else:
-        mismatches.append("Amount not available for comparison")
-
-    # Optional fields — only checked if both sides have values
-    for field, label in (("iec", "IEC"), ("port_code", "Port Code"), ("ad_code", "AD Code")):
-        sv = sb.get(field)
-        ev = ebrc.get(field)
-        if sv and ev and sv != ev:
-            mismatches.append(f"{label} mismatch (SB: {sv}, eBRC: {ev})")
-
+    # ── Verdict ─────────────────────────────────────────────────────────────
     if not mismatches:
-        return ReconciliationStatus.EXACT_MATCH, "", "Exact match"
+        return (
+            ReconciliationStatus.EXACT_MATCH,
+            "",
+            "Exact match — SB Number, SB Date, Invoice Number, and Invoice Date all match",
+        )
 
-    # Determine severity
-    critical_keywords = ("Amount", "Currency", "Invoice")
-    critical = [m for m in mismatches if any(k in m for k in critical_keywords)]
     reason_str = "; ".join(mismatches)
 
-    if critical:
-        return ReconciliationStatus.MISMATCH, reason_str, reason_str
-    return ReconciliationStatus.PARTIAL_MATCH, reason_str, reason_str
-
-
-# ---------------------------------------------------------------------------
-# Grouped (one-to-many) matching
-# ---------------------------------------------------------------------------
-
-def try_grouped_match(
-    sb: pd.Series,
-    candidates: pd.DataFrame,
-    tolerance: float,
-) -> Tuple[bool, str]:
-    """
-    Check if sum of realised_amounts across candidates equals sb fob_value.
-    Returns (matched, remarks).
-    """
-    valid_amounts = candidates["realised_amount"].dropna()
-    if valid_amounts.empty:
-        return False, ""
-    total = valid_amounts.sum()
-    if amounts_match(sb["fob_value"], total, tolerance):
-        ebrc_refs = ", ".join(
-            str(v) for v in candidates.get("ebrc_number", pd.Series()).dropna().unique()
-        )
-        return True, (
-            f"Grouped amount matched successfully across {len(candidates)} eBRC rows"
-            + (f" (eBRC refs: {ebrc_refs})" if ebrc_refs else "")
-        )
-    return False, ""
+    # 1 field off → PARTIAL_MATCH; 2+ fields off → MISMATCH
+    if len(mismatches) == 1:
+        return ReconciliationStatus.PARTIAL_MATCH, reason_str, reason_str
+    return ReconciliationStatus.MISMATCH, reason_str, reason_str
 
 
 # ---------------------------------------------------------------------------
@@ -481,15 +417,11 @@ def reconcile(
     ebrc_filename: str,
     config: ReconciliationConfig,
 ) -> Tuple[List[Dict], ReconciliationSummary]:
-    """
-    Parse, normalise, match, and return per-row result dicts + summary.
-    Each result dict contains keys needed for Google Sheets update.
-    """
     summary = ReconciliationSummary()
     results: List[Dict] = []
     now = datetime.utcnow()
 
-    # --- Parse files ---
+    # ── Parse ────────────────────────────────────────────────────────────────
     try:
         sb_raw = read_file(sb_bytes, sb_filename)
     except Exception as exc:
@@ -500,28 +432,27 @@ def reconcile(
     except Exception as exc:
         raise ValueError(f"Cannot read eBRC file: {exc}") from exc
 
-    # --- Map columns ---
-    sb_map = map_columns(sb_raw, SB_ALIASES)
+    # ── Map & validate columns ───────────────────────────────────────────────
+    sb_map   = map_columns(sb_raw,   SB_ALIASES)
     ebrc_map = map_columns(ebrc_raw, EBRC_ALIASES)
 
-    validate_columns(sb_map, SB_REQUIRED, "Shipping Bill")
+    validate_columns(sb_map,   SB_REQUIRED,   "Shipping Bill")
     validate_columns(ebrc_map, EBRC_REQUIRED, "eBRC")
 
-    # --- Normalise ---
-    sb_df = build_normalised_sb(sb_raw, sb_map)
+    # ── Normalise ────────────────────────────────────────────────────────────
+    sb_df   = build_normalised_sb(sb_raw,   sb_map)
     ebrc_df = build_normalised_ebrc(ebrc_raw, ebrc_map)
 
-    # --- Build eBRC lookup indexed by SB number ---
+    # ── Build eBRC lookup by SB Number ───────────────────────────────────────
     ebrc_by_sb: Dict[str, pd.DataFrame] = {}
     for _, row in ebrc_df.iterrows():
         key = str(row["shipping_bill_number"])
         ebrc_by_sb.setdefault(key, []).append(row)
     ebrc_by_sb = {k: pd.DataFrame(v) for k, v in ebrc_by_sb.items()}
 
-    # Track which eBRC SB numbers were consumed (for MISSING_IN_SHIPPING_BILL)
-    matched_ebrc_sbs = set()
+    matched_ebrc_sbs: set = set()
 
-    # --- Process each SB row ---
+    # ── Process each SB row ──────────────────────────────────────────────────
     for _, sb_row in sb_df.iterrows():
         sb_num = str(sb_row["shipping_bill_number"])
         orig_sb_num = sb_raw.iloc[int(sb_row["_orig_index"])].get(
@@ -532,76 +463,62 @@ def reconcile(
             candidates = ebrc_by_sb.get(sb_num, pd.DataFrame())
 
             if candidates.empty:
-                status = ReconciliationStatus.MISSING_IN_EBRC
-                reason = "No corresponding eBRC found"
-                remarks = "No corresponding eBRC found"
+                status     = ReconciliationStatus.MISSING_IN_EBRC
+                reason     = "No corresponding eBRC found for this SB Number"
+                remarks    = reason
                 matched_id = None
 
             elif len(candidates) == 1:
-                ebrc_row = candidates.iloc[0]
-                matched_id = str(ebrc_row.get("ebrc_number", "") or sb_num)
-                status, reason, remarks = compare_sb_ebrc(sb_row, ebrc_row, config.amount_tolerance)
+                ebrc_row   = candidates.iloc[0]
+                matched_id = str(ebrc_row.get("ebrc_number") or sb_num)
+                status, reason, remarks = compare_sb_ebrc(sb_row, ebrc_row)
                 matched_ebrc_sbs.add(sb_num)
 
             else:
-                # Multiple eBRC rows
+                # Multiple eBRC rows share the same SB Number
                 matched_ebrc_sbs.add(sb_num)
 
-                # 1) Try grouped matching
-                if config.enable_grouped_matching and sb_row["fob_value"] is not None:
-                    grouped_ok, grouped_remarks = try_grouped_match(
-                        sb_row, candidates, config.amount_tolerance
-                    )
-                    if grouped_ok:
-                        status = ReconciliationStatus.EXACT_MATCH
-                        reason = ""
-                        remarks = grouped_remarks
-                        matched_id = ",".join(
-                            str(v) for v in candidates.get("ebrc_number", pd.Series()).dropna()
-                        ) or sb_num
-                        _emit(results, summary, sb_num, orig_sb_num, matched_id, status, reason, remarks, now)
-                        continue
-
-                # 2) Try to find a single best candidate (invoice + currency match)
-                invoice_matches = candidates[
-                    candidates["invoice_number"] == sb_row["invoice_number"]
+                # Narrow down by invoice number first, then invoice date
+                inv_matches = candidates[
+                    candidates["invoice_number"] == sb_row.get("invoice_number", "")
                 ]
-                currency_matches = invoice_matches[
-                    invoice_matches["currency"] == sb_row["currency"]
-                ] if not invoice_matches.empty else pd.DataFrame()
+                date_matches = inv_matches[
+                    inv_matches["invoice_date"] == sb_row.get("invoice_date", "")
+                ] if not inv_matches.empty else pd.DataFrame()
 
                 best_pool = (
-                    currency_matches if not currency_matches.empty
-                    else invoice_matches if not invoice_matches.empty
+                    date_matches if not date_matches.empty
+                    else inv_matches if not inv_matches.empty
                     else candidates
                 )
 
                 if len(best_pool) == 1:
-                    ebrc_row = best_pool.iloc[0]
-                    matched_id = str(ebrc_row.get("ebrc_number", "") or sb_num)
-                    status, reason, remarks = compare_sb_ebrc(
-                        sb_row, ebrc_row, config.amount_tolerance
-                    )
+                    ebrc_row   = best_pool.iloc[0]
+                    matched_id = str(ebrc_row.get("ebrc_number") or sb_num)
+                    status, reason, remarks = compare_sb_ebrc(sb_row, ebrc_row)
                 else:
-                    status = ReconciliationStatus.AMBIGUOUS_MATCH
-                    reason = f"Multiple possible eBRC matches found ({len(candidates)} rows)"
-                    remarks = reason
+                    status     = ReconciliationStatus.AMBIGUOUS_MATCH
+                    reason     = (
+                        f"{len(candidates)} eBRC rows share SB Number {sb_num} "
+                        "and could not be narrowed to a single match"
+                    )
+                    remarks    = reason
                     matched_id = None
 
         except Exception as exc:
             logger.exception("Error processing SB row %s", sb_num)
-            status = ReconciliationStatus.ERROR
-            reason = str(exc)
-            remarks = f"Processing error: {exc}"
+            status     = ReconciliationStatus.ERROR
+            reason     = str(exc)
+            remarks    = f"Processing error: {exc}"
             matched_id = None
 
         _emit(results, summary, sb_num, orig_sb_num, matched_id, status, reason, remarks, now)
 
-    # --- Flag eBRC rows with no matching SB ---
+    # ── Flag eBRC rows with no matching SB ──────────────────────────────────
     for ebrc_sb_num, ebrc_group in ebrc_by_sb.items():
         if ebrc_sb_num not in matched_ebrc_sbs:
             for _, ebrc_row in ebrc_group.iterrows():
-                ebrc_ref = str(ebrc_row.get("ebrc_number", "") or ebrc_sb_num)
+                ebrc_ref = str(ebrc_row.get("ebrc_number") or ebrc_sb_num)
                 audit = AuditRow(
                     source_identifier=ebrc_ref,
                     matched_identifier=None,
@@ -619,11 +536,15 @@ def reconcile(
                     "matched_id": None,
                     "status": ReconciliationStatus.MISSING_IN_SHIPPING_BILL,
                     "remarks": "No corresponding Shipping Bill found",
-                    "sheets_update": False,  # eBRC-only rows; nothing to write to SB sheet
+                    "sheets_update": False,
                 })
 
     return results, summary
 
+
+# ---------------------------------------------------------------------------
+# Internal helper
+# ---------------------------------------------------------------------------
 
 def _emit(
     results: List[Dict],
